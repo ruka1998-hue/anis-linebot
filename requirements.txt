@@ -1,0 +1,8 @@
+flask
+line-bot-sdk>=3.0.0
+gspread
+google-auth
+google-genai
+Pillow
+schedule
+gunicorn

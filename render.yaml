@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: anis-linebot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn main:app
+    envVars:
+      - key: LINE_CHANNEL_ACCESS_TOKEN
+        sync: false
+      - key: LINE_CHANNEL_SECRET
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: SHEET_URL
+        sync: false
+      - key: LINE_USER_ID
+        sync: false
+      - key: GOOGLE_CREDS_JSON
+        sync: false
