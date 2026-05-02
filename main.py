@@ -8,7 +8,8 @@ from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
     Configuration, ApiClient, MessagingApi,
     ReplyMessageRequest, PushMessageRequest,
-    TextMessage, FlexMessage, FlexContainer
+    TextMessage, FlexMessage, FlexContainer,
+    QuickReply, QuickReplyItem, MessageAction
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent, ImageMessageContent
 import gspread
@@ -23,6 +24,9 @@ import threading
 import time
 
 app = Flask(__name__)
+
+# 多步驟記帳狀態
+record_state = {}  # {user_id: {"step": "category/amount/note", "data": {}}}
 
 # ── 設定 ──────────────────────────────────────────────────
 LINE_TOKEN  = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
@@ -68,6 +72,10 @@ def append_transaction(date_str, tx_type, category, amount, currency="TWD", note
     except Exception as e:
         print(f"寫入失敗: {e}")
         return False
+
+def safe_float(val):
+    try: return float(str(val).replace(",","").replace(" ",""))
+    except: return None
 
 def get_today_stats():
     try:
@@ -266,6 +274,20 @@ def callback():
         abort(400)
     return "OK"
 
+def reply_with_categories(reply_token, msg="選擇支出類別："):
+    """回覆帶有類別快速選擇按鈕"""
+    cats = ["🍱外食","☕飲料","🚌交通","🛒日用品","🎮手遊","🏥醫療","👕購物","📚教育","💳其他"]
+    items = [QuickReplyItem(action=MessageAction(label=c, text=f"__cat_{c}")) for c in cats]
+    try:
+        with ApiClient(configuration) as api_client:
+            api = MessagingApi(api_client)
+            api.reply_message(ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=[TextMessage(text=msg, quick_reply=QuickReply(items=items))]
+            ))
+    except Exception as e:
+        print(f"quick reply 失敗: {e}")
+
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text(event):
     text = event.message.text.strip()
@@ -273,6 +295,44 @@ def handle_text(event):
     today = date.today().strftime("%Y/%m/%d")
 
     # 指令處理
+    user_id = event.source.user_id
+
+    # 多步驟記帳流程
+    if user_id in record_state:
+        state = record_state[user_id]
+
+        if state["step"] == "category" and text.startswith("__cat_"):
+            # 選完類別，問金額
+            cat = text.replace("__cat_", "")
+            record_state[user_id] = {"step": "amount", "data": {"category": cat}}
+            reply_message(reply_token, f"類別：{cat}\n\n💰 金額是多少？（直接傳數字）")
+            return
+
+        elif state["step"] == "amount":
+            amt = safe_float(text)
+            if not amt:
+                reply_message(reply_token, "請傳數字金額，例如：85")
+                return
+            record_state[user_id]["data"]["amount"] = amt
+            record_state[user_id]["step"] = "note"
+            reply_message(reply_token, f"金額：NT${int(amt):,}\n\n📌 備註是什麼？（或傳「略過」）")
+            return
+
+        elif state["step"] == "note":
+            note = "" if text == "略過" else text
+            data = record_state[user_id]["data"]
+            del record_state[user_id]
+            if append_transaction(today, "支出", data["category"], data["amount"], "TWD", note):
+                reply_message(reply_token, f"✅ 記帳完成！\n{data['category']} NT${int(data['amount']):,}\n{note}")
+            else:
+                reply_message(reply_token, "記帳失敗，請稍後再試。")
+            return
+
+    if text in ["記帳", "手動記帳", "新增"]:
+        record_state[user_id] = {"step": "category", "data": {}}
+        reply_with_categories(reply_token, "選擇支出類別：")
+        return
+
     if text in ["今天", "今日", "今天花了多少", "今日支出"]:
         spend, income, rows = get_today_stats()
         if not rows:
@@ -292,20 +352,23 @@ def handle_text(event):
     if text in ["說明", "幫助", "help", "功能"]:
         msg = """⚡ 阿妮斯の幕僚室 使用說明
 
-📝 快速記帳
-直接傳：「85 午餐」或「午餐 85」
-我幫你自動記下來！
+⚡ 快速記帳
+直接傳：「85 午餐」或「50 健身」
+自動辨識金額和類別！
+
+📝 手動記帳
+傳「記帳」→ 選類別 → 輸入金額 → 備註
 
 📊 查詢指令
-・今天 → 今日支出統計
-・本月 → 本月收支統計
+・今天 → 今日支出
+・本月 → 本月收支
 ・說明 → 這個說明
 
 💬 自由對話
-有任何理財問題直接問我！
+有理財問題直接問！
 
 📷 拍照記帳
-傳收據照片給我，自動辨識記帳！"""
+傳收據照片自動辨識！"""
         reply_message(reply_token, msg)
         return
 
