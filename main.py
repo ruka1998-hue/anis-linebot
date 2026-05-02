@@ -25,12 +25,17 @@ import time
 app = Flask(__name__)
 
 # ── 設定 ──────────────────────────────────────────────────
-LINE_TOKEN  = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
-LINE_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "")
-GEMINI_KEY  = os.environ.get("GEMINI_API_KEY", "")
-SHEET_URL   = os.environ.get("SHEET_URL", "https://docs.google.com/spreadsheets/d/1XQYryy0tMl-nuOKFLEotpLtaEDRymyDaHN6DNrJdMOc/edit")
-USER_ID     = os.environ.get("LINE_USER_ID", "")  # 你的 Line User ID
+LINE_TOKEN  = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
+LINE_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "").strip()
+GEMINI_KEY  = os.environ.get("GEMINI_API_KEY", "").strip()
+SHEET_URL   = os.environ.get("SHEET_URL", "https://docs.google.com/spreadsheets/d/1XQYryy0tMl-nuOKFLEotpLtaEDRymyDaHN6DNrJdMOc/edit").strip()
+USER_ID     = os.environ.get("LINE_USER_ID", "").strip()
 GEMINI_MODEL = "gemini-flash-latest"
+
+# Debug
+print(f"[DEBUG] TOKEN length: {len(LINE_TOKEN)}")
+print(f"[DEBUG] TOKEN start: {LINE_TOKEN[:15]}...")
+print(f"[DEBUG] TOKEN end: ...{LINE_TOKEN[-15:]}")
 
 configuration = Configuration(access_token=LINE_TOKEN)
 handler = WebhookHandler(LINE_SECRET)
