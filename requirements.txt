@@ -6,3 +6,4 @@ google-genai
 Pillow
 schedule
 gunicorn
+yfinance
