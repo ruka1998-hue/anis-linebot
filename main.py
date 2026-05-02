@@ -305,20 +305,46 @@ def callback():
         abort(400)
     return "OK"
 
-def reply_with_categories(reply_token, msg="選擇支出類別："):
-    """回覆帶有類別快速選擇按鈕"""
-    cats = [
+# 類別頁面
+CAT_PAGES = [
+    [   # 第1頁：餐飲交通
         ("🍱外食", "🍱 餐飲-外食"),
+        ("🏠自煮", "🏠 餐飲-自煮"),
         ("☕飲料", "☕ 餐飲-飲料咖啡"),
-        ("🚌交通", "🚌 交通-大眾運輸"),
+        ("🚌大眾運輸", "🚌 交通-大眾運輸"),
+        ("⛽油費停車", "🚗 交通-油費停車"),
+        ("✈️機票旅費", "✈️ 交通-機票旅費"),
+        ("➡️更多類別", "__NEXT_PAGE__"),
+        ("✏️自訂類別", "__CUSTOM__"),
+    ],
+    [   # 第2頁：購物娛樂
+        ("👕衣物", "👕 購物-衣物"),
         ("🛒日用品", "🛒 購物-日用品"),
-        ("🎮手遊", "🎮 娛樂-手遊課金"),
-        ("🏥醫療", "🏥 醫療健康"),
-        ("👕購物", "👕 購物-衣物"),
-        ("📚教育", "📚 教育進修"),
-        ("❓其他", "❓ 其他支出"),
-    ]
-    items = [QuickReplyItem(action=MessageAction(label=label, text=f"__CAT__{cat_val}")) for label, cat_val in cats]
+        ("📱3C", "📱 購物-3C"),
+        ("🎮手遊課金", "🎮 娛樂-手遊課金"),
+        ("🎬電影演唱會", "🎬 娛樂-電影演唱會"),
+        ("📺訂閱服務", "📺 娛樂-訂閱服務"),
+        ("➡️更多類別", "__NEXT_PAGE2__"),
+        ("⬅️上一頁", "__PREV_PAGE__"),
+    ],
+    [   # 第3頁：其他
+        ("🏥醫療健康", "🏥 醫療健康"),
+        ("📚教育進修", "📚 教育進修"),
+        ("🏠房租", "🏠 居住-房租"),
+        ("💡水電瓦斯", "💡 居住-水電瓦斯"),
+        ("💳保險", "💳 保險"),
+        ("🎁人情禮金", "🎁 人情禮金"),
+        ("❓其他支出", "❓ 其他支出"),
+        ("⬅️上一頁", "__PREV_PAGE2__"),
+    ],
+]
+
+def reply_with_categories(reply_token, msg="選擇支出類別：", page=0):
+    """回覆帶有類別快速選擇按鈕"""
+    cats = CAT_PAGES[page]
+    items = []
+    for label, cat_val in cats:
+        items.append(QuickReplyItem(action=MessageAction(label=label, text=f"__CAT__{cat_val}")))
     try:
         with ApiClient(configuration) as api_client:
             api = MessagingApi(api_client)
@@ -343,10 +369,33 @@ def handle_text(event):
         state = record_state[user_id]
 
         if state["step"] == "category" and text.startswith("__CAT__"):
+            cat_val = text.replace("__CAT__", "")
+            # 分頁控制
+            if cat_val == "__NEXT_PAGE__":
+                reply_with_categories(reply_token, "選擇支出類別（第2頁）：", page=1)
+                return
+            elif cat_val == "__NEXT_PAGE2__":
+                reply_with_categories(reply_token, "選擇支出類別（第3頁）：", page=2)
+                return
+            elif cat_val == "__PREV_PAGE__":
+                reply_with_categories(reply_token, "選擇支出類別（第1頁）：", page=0)
+                return
+            elif cat_val == "__PREV_PAGE2__":
+                reply_with_categories(reply_token, "選擇支出類別（第2頁）：", page=1)
+                return
+            elif cat_val == "__CUSTOM__":
+                record_state[user_id] = {"step": "custom_cat", "data": {}}
+                reply_message(reply_token, "請輸入自訂類別名稱：\n例如：機車油費、寵物費用")
+                return
             # 選完類別，問金額
-            cat = text.replace("__CAT__", "")
-            record_state[user_id] = {"step": "amount", "data": {"category": cat}}
-            reply_message(reply_token, f"類別：{cat}\n\n💰 金額是多少？（直接傳數字）")
+            record_state[user_id] = {"step": "amount", "data": {"category": cat_val}}
+            reply_message(reply_token, f"類別：{cat_val}\n\n💰 金額是多少？（直接傳數字）")
+            return
+
+        if state["step"] == "custom_cat":
+            custom_cat = text.strip()
+            record_state[user_id] = {"step": "amount", "data": {"category": custom_cat}}
+            reply_message(reply_token, f"類別：{custom_cat}\n\n💰 金額是多少？（直接傳數字）")
             return
 
         elif state["step"] == "amount":
@@ -368,6 +417,39 @@ def handle_text(event):
             else:
                 reply_message(reply_token, "記帳失敗，請稍後再試。")
             return
+
+    if text in ["資產", "我的資產", "總資產", "帳戶"]:
+        try:
+            sh = get_sheet()
+            ws_a = sh.worksheet("Assets")
+            rows = ws_a.get_all_values()
+            if not rows or len(rows) < 2:
+                reply_message(reply_token, "找不到資產資料。")
+                return
+            headers = [h.strip().lower() for h in rows[0]]
+            total = 0
+            details = []
+            for row in rows[1:]:
+                if len(row) < 3: continue
+                try:
+                    amt_idx = headers.index("amount") if "amount" in headers else 2
+                    name_idx = headers.index("name") if "name" in headers else 1
+                    curr_idx = headers.index("currency") if "currency" in headers else 3
+                    v = float(str(row[amt_idx]).replace(",",""))
+                    name = row[name_idx] if len(row) > name_idx else ""
+                    curr = row[curr_idx].upper() if len(row) > curr_idx else "TWD"
+                    rate = 32.5 if curr == "USD" else 0.215 if curr == "JPY" else 1.0
+                    twd = v * rate
+                    total += twd
+                    if v != 0:
+                        details.append(f"・{name}：NT${int(twd):,}")
+                except: continue
+            detail_str = "\n".join(details[:8])
+            msg = f"💰 資產總覽\n\n{detail_str}\n\n{'─'*20}\n總計：NT${int(total):,}"
+            reply_message(reply_token, msg)
+        except Exception as e:
+            reply_message(reply_token, f"查詢失敗：{e}")
+        return
 
     if text in ["記帳", "手動記帳", "新增"]:
         record_state[user_id] = {"step": "category", "data": {}}
@@ -470,6 +552,20 @@ def handle_image(event):
         reply_message(reply_token, "辨識成功但記帳失敗，請稍後再試。")
 
 # ── 啟動 ──────────────────────────────────────────────────
+@app.route("/ping", methods=["GET"])
+def ping():
+    """Keep-alive endpoint"""
+    return "pong", 200
+
+@app.route("/remind", methods=["GET","POST"])
+def trigger_remind():
+    """外部觸發提醒（用 cron-job.org 定時呼叫）"""
+    t = request.args.get("type", "evening")
+    if t == "morning": morning_remind()
+    elif t == "weekly": weekly_report()
+    else: evening_remind()
+    return "ok", 200
+
 if __name__ == "__main__":
     # 啟動排程執行緒
     t = threading.Thread(target=run_scheduler, daemon=True)
