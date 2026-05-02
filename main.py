@@ -108,6 +108,36 @@ def get_today_stats():
     except Exception as e:
         return 0, 0, []
 
+def get_budget_limit():
+    """從 Google Sheets 讀取月預算上限"""
+    try:
+        sh = get_sheet()
+        ws = sh.worksheet("Budget")
+        rows = ws.get_all_values()
+        if not rows or len(rows) < 2: return 0
+        headers = [h.strip().lower() for h in rows[0]]
+        if "totalbudget" in headers:
+            idx = headers.index("totalbudget")
+            v = rows[1][idx] if len(rows[1]) > idx else "0"
+            return float(str(v).replace(",","")) or 0
+        return 0
+    except: return 0
+
+def check_budget_alert():
+    """檢查本月支出是否超過預算，超過就推播提醒"""
+    if not USER_ID: return
+    limit = get_budget_limit()
+    if not limit: return
+    spend, _ = get_month_stats()
+    pct = spend / limit * 100
+    # 80% 警告、100% 超標
+    if pct >= 100:
+        msg = f"🚨 指揮官！本月支出已超出預算！\n\n預算：NT${int(limit):,}\n實際：NT${int(spend):,}\n超支：NT${int(spend-limit):,}\n\n要認真檢討了。"
+        send_message(USER_ID, msg)
+    elif pct >= 80:
+        msg = f"⚠️ 指揮官，本月預算已用了 {pct:.0f}%！\n\n預算：NT${int(limit):,}\n已花：NT${int(spend):,}\n剩餘：NT${int(limit-spend):,}\n\n接下來要注意一點。"
+        send_message(USER_ID, msg)
+
 def get_month_stats():
     try:
         sh = get_sheet()
@@ -256,9 +286,10 @@ def weekly_report():
     send_message(USER_ID, msg)
 
 def run_scheduler():
-    schedule.every().day.at("08:00").do(morning_remind)   # 早上8點
-    schedule.every().day.at("21:00").do(evening_remind)   # 晚上9點提醒記帳
-    schedule.every().monday.at("08:00").do(weekly_report) # 週一早上週報
+    schedule.every().day.at("08:00").do(morning_remind)        # 早上8點
+    schedule.every().day.at("21:00").do(evening_remind)        # 晚上9點提醒記帳
+    schedule.every().monday.at("08:00").do(weekly_report)      # 週一早上週報
+    schedule.every().day.at("22:00").do(check_budget_alert)    # 每晚10點檢查預算
     while True:
         schedule.run_pending()
         time.sleep(60)
@@ -276,8 +307,18 @@ def callback():
 
 def reply_with_categories(reply_token, msg="選擇支出類別："):
     """回覆帶有類別快速選擇按鈕"""
-    cats = ["🍱外食","☕飲料","🚌交通","🛒日用品","🎮手遊","🏥醫療","👕購物","📚教育","💳其他"]
-    items = [QuickReplyItem(action=MessageAction(label=c, text=f"__cat_{c}")) for c in cats]
+    cats = [
+        ("🍱外食", "🍱 餐飲-外食"),
+        ("☕飲料", "☕ 餐飲-飲料咖啡"),
+        ("🚌交通", "🚌 交通-大眾運輸"),
+        ("🛒日用品", "🛒 購物-日用品"),
+        ("🎮手遊", "🎮 娛樂-手遊課金"),
+        ("🏥醫療", "🏥 醫療健康"),
+        ("👕購物", "👕 購物-衣物"),
+        ("📚教育", "📚 教育進修"),
+        ("❓其他", "❓ 其他支出"),
+    ]
+    items = [QuickReplyItem(action=MessageAction(label=label, text=f"__CAT__{cat_val}")) for label, cat_val in cats]
     try:
         with ApiClient(configuration) as api_client:
             api = MessagingApi(api_client)
@@ -301,9 +342,9 @@ def handle_text(event):
     if user_id in record_state:
         state = record_state[user_id]
 
-        if state["step"] == "category" and text.startswith("__cat_"):
+        if state["step"] == "category" and text.startswith("__CAT__"):
             # 選完類別，問金額
-            cat = text.replace("__cat_", "")
+            cat = text.replace("__CAT__", "")
             record_state[user_id] = {"step": "amount", "data": {"category": cat}}
             reply_message(reply_token, f"類別：{cat}\n\n💰 金額是多少？（直接傳數字）")
             return
