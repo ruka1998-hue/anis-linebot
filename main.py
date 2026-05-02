@@ -423,7 +423,6 @@ def handle_text(event):
             sh = get_sheet()
             total = 0
             details = []
-            # Assets 分頁
             try:
                 ws_a = sh.worksheet("Assets")
                 rows = ws_a.get_all_values()
@@ -446,14 +445,27 @@ def handle_text(event):
                                 details.append(f"{sign}{name}：NT${int(twd):,}")
                         except: continue
             except: pass
-            # Stocks 分頁
-            try:
-                import yfinance as yf
-                ws_s = sh.worksheet("Stocks")
-                srows = ws_s.get_all_values()
-                if srows and len(srows) >= 2:
+
+            if not details:
+                reply_message(reply_token, "找不到資產資料。")
+                return
+
+            detail_str = "\n".join(details[:10])
+            cash_msg = f"💰 現金資產\n\n{detail_str}\n\n{'─'*15}\n小計：NT${int(total):,}\n\n📈 股票查詢中，稍等..."
+            reply_message(reply_token, cash_msg)
+
+            def fetch_stocks_push(cash_total, uid):
+                try:
+                    import yfinance as yf
+                    sh2 = get_sheet()
+                    ws_s = sh2.worksheet("Stocks")
+                    srows = ws_s.get_all_values()
+                    if not srows or len(srows) < 2:
+                        send_message(uid, "股票分頁是空的。")
+                        return
                     sheaders = [h.strip().lower() for h in srows[0]]
                     stock_total = 0
+                    stock_lines = []
                     for row in srows[1:]:
                         if len(row) < 2: continue
                         try:
@@ -463,25 +475,26 @@ def handle_text(event):
                             sym = str(row[sym_idx]).strip().upper()
                             qty = float(str(row[sha_idx]).replace(",",""))
                             if not sym or not qty: continue
-                            hist = yf.Ticker(sym).history(period="1d")["Close"]
+                            hist = yf.Ticker(sym).history(period="2d")["Close"]
                             if hist.empty: continue
                             price = float(hist.iloc[-1])
                             is_tw = sym.endswith(".TW") or sym.endswith(".TWO")
                             twd = price * qty * (1.0 if is_tw else 32.5)
-                            total += twd
                             stock_total += twd
                             name = row[name_idx] if len(row) > name_idx else sym
-                            details.append(f"・{name}({sym})：NT${int(twd):,}")
+                            stock_lines.append(f"・{name}({sym})：NT${int(twd):,}")
                         except: continue
-                    if stock_total > 0:
-                        details.append(f"📈 股票小計：NT${int(stock_total):,}")
-            except: pass
-            if not details:
-                reply_message(reply_token, "找不到資產資料。")
-                return
-            detail_str = "\n".join(details[:10])
-            msg = f"💰 資產總覽\n\n{detail_str}\n\n{'─'*15}\n淨資產：NT${int(total):,}"
-            reply_message(reply_token, msg)
+                    if stock_lines:
+                        net = cash_total + stock_total
+                        push_msg = f"📈 股票市值\n\n{"\n".join(stock_lines)}\n\n{'─'*15}\n股票小計：NT${int(stock_total):,}\n💰 淨資產合計：NT${int(net):,}"
+                        send_message(uid, push_msg)
+                    else:
+                        send_message(uid, "找不到股票資料。")
+                except Exception as e:
+                    send_message(uid, f"股票查詢失敗：{e}")
+
+            threading.Thread(target=fetch_stocks_push, args=(total, user_id), daemon=True).start()
+
         except Exception as e:
             reply_message(reply_token, f"查詢失敗：{e}")
         return
