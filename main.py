@@ -418,34 +418,69 @@ def handle_text(event):
                 reply_message(reply_token, "記帳失敗，請稍後再試。")
             return
 
-    if text in ["資產", "我的資產", "總資產", "帳戶"]:
+    if text in ["資產", "我的資產", "總資產", "帳戶", "淨資產"]:
         try:
             sh = get_sheet()
-            ws_a = sh.worksheet("Assets")
-            rows = ws_a.get_all_values()
-            if not rows or len(rows) < 2:
-                reply_message(reply_token, "找不到資產資料。")
-                return
-            headers = [h.strip().lower() for h in rows[0]]
             total = 0
             details = []
-            for row in rows[1:]:
-                if len(row) < 3: continue
-                try:
-                    amt_idx = headers.index("amount") if "amount" in headers else 2
-                    name_idx = headers.index("name") if "name" in headers else 1
-                    curr_idx = headers.index("currency") if "currency" in headers else 3
-                    v = float(str(row[amt_idx]).replace(",",""))
-                    name = row[name_idx] if len(row) > name_idx else ""
-                    curr = row[curr_idx].upper() if len(row) > curr_idx else "TWD"
-                    rate = 32.5 if curr == "USD" else 0.215 if curr == "JPY" else 1.0
-                    twd = v * rate
-                    total += twd
-                    if v != 0:
-                        details.append(f"・{name}：NT${int(twd):,}")
-                except: continue
-            detail_str = "\n".join(details[:8])
-            msg = f"💰 資產總覽\n\n{detail_str}\n\n{'─'*20}\n總計：NT${int(total):,}"
+            # Assets 分頁
+            try:
+                ws_a = sh.worksheet("Assets")
+                rows = ws_a.get_all_values()
+                if rows and len(rows) >= 2:
+                    headers = [h.strip().lower() for h in rows[0]]
+                    for row in rows[1:]:
+                        if len(row) < 3: continue
+                        try:
+                            amt_idx = headers.index("amount") if "amount" in headers else 2
+                            name_idx = headers.index("name") if "name" in headers else 1
+                            curr_idx = headers.index("currency") if "currency" in headers else 3
+                            v = float(str(row[amt_idx]).replace(",",""))
+                            name = row[name_idx] if len(row) > name_idx else ""
+                            curr = row[curr_idx].upper() if len(row) > curr_idx else "TWD"
+                            rate = 32.5 if curr == "USD" else 0.215 if curr == "JPY" else 1.0
+                            twd = v * rate
+                            total += twd
+                            if v != 0:
+                                sign = "🔴" if twd < 0 else "・"
+                                details.append(f"{sign}{name}：NT${int(twd):,}")
+                        except: continue
+            except: pass
+            # Stocks 分頁
+            try:
+                import yfinance as yf
+                ws_s = sh.worksheet("Stocks")
+                srows = ws_s.get_all_values()
+                if srows and len(srows) >= 2:
+                    sheaders = [h.strip().lower() for h in srows[0]]
+                    stock_total = 0
+                    for row in srows[1:]:
+                        if len(row) < 2: continue
+                        try:
+                            sym_idx = sheaders.index("symbol") if "symbol" in sheaders else 0
+                            sha_idx = sheaders.index("shares") if "shares" in sheaders else 2
+                            name_idx = sheaders.index("name") if "name" in sheaders else 1
+                            sym = str(row[sym_idx]).strip().upper()
+                            qty = float(str(row[sha_idx]).replace(",",""))
+                            if not sym or not qty: continue
+                            hist = yf.Ticker(sym).history(period="1d")["Close"]
+                            if hist.empty: continue
+                            price = float(hist.iloc[-1])
+                            is_tw = sym.endswith(".TW") or sym.endswith(".TWO")
+                            twd = price * qty * (1.0 if is_tw else 32.5)
+                            total += twd
+                            stock_total += twd
+                            name = row[name_idx] if len(row) > name_idx else sym
+                            details.append(f"・{name}({sym})：NT${int(twd):,}")
+                        except: continue
+                    if stock_total > 0:
+                        details.append(f"📈 股票小計：NT${int(stock_total):,}")
+            except: pass
+            if not details:
+                reply_message(reply_token, "找不到資產資料。")
+                return
+            detail_str = "\n".join(details[:10])
+            msg = f"💰 資產總覽\n\n{detail_str}\n\n{'─'*15}\n淨資產：NT${int(total):,}"
             reply_message(reply_token, msg)
         except Exception as e:
             reply_message(reply_token, f"查詢失敗：{e}")
@@ -477,14 +512,14 @@ def handle_text(event):
 
 ⚡ 快速記帳
 直接傳：「85 午餐」或「50 健身」
-自動辨識金額和類別！
 
 📝 手動記帳
-傳「記帳」→ 選類別 → 輸入金額 → 備註
+傳「記帳」→ 選類別 → 金額 → 備註
 
 📊 查詢指令
 ・今天 → 今日支出
 ・本月 → 本月收支
+・資產 → 資產總覽
 ・說明 → 這個說明
 
 💬 自由對話
