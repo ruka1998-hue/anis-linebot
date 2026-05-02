@@ -160,19 +160,28 @@ def ai_parse_receipt(img_bytes):
         return {"error": str(e)}
 
 def parse_quick_record(text):
-    """嘗試從文字解析快速記帳，例如「午餐 85」「買飲料 45」"""
+    """嘗試從文字解析快速記帳，例如「午餐 85」「50 健身」"""
+    text = text.strip()
+    # 忽略指令
+    if text in ["今天","今日","本月","這個月","說明","help","功能","昨天","月報"]:
+        return None
     patterns = [
-        r'(.+?)\s+(\d+(?:\.\d+)?)',
-        r'(\d+(?:\.\d+)?)\s+(.+)',
+        r'^(\d+(?:\.\d+)?)\s+(.+)$',   # 數字在前：50 健身
+        r'^(.+?)\s+(\d+(?:\.\d+)?)$',  # 文字在前：健身 50
+        r'^(\d+(?:\.\d+)?)(.+)$',      # 無空格數字在前：50健身
+        r'^(.+?)(\d+(?:\.\d+)?)$',     # 無空格文字在前：健身50
     ]
     for p in patterns:
-        m = re.match(p, text.strip())
+        m = re.match(p, text)
         if m:
             g1, g2 = m.group(1), m.group(2)
             try:
-                amt = float(g2); note = g1
+                amt = float(g1); note = g2.strip()
+                if not note: continue
             except:
-                try: amt = float(g1); note = g2
+                try:
+                    amt = float(g2); note = g1.strip()
+                    if not note: continue
                 except: continue
             # 猜測類別
             cat = "❓ 其他支出"
@@ -239,9 +248,9 @@ def weekly_report():
     send_message(USER_ID, msg)
 
 def run_scheduler():
-    schedule.every().day.at("09:00").do(morning_remind)
-    schedule.every().day.at("21:00").do(evening_remind)
-    schedule.every().monday.at("09:00").do(weekly_report)
+    schedule.every().day.at("08:00").do(morning_remind)   # 早上8點
+    schedule.every().day.at("21:00").do(evening_remind)   # 晚上9點提醒記帳
+    schedule.every().monday.at("08:00").do(weekly_report) # 週一早上週報
     while True:
         schedule.run_pending()
         time.sleep(60)
