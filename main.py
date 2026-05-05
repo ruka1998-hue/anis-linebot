@@ -203,6 +203,11 @@ def parse_quick_record(text):
     # 忽略指令
     if text in ["今天","今日","本月","這個月","說明","help","功能","昨天","月報"]:
         return None
+    # 純數字不解析（避免誤判為快速記帳）
+    try:
+        float(text.replace(",",""))
+        return None
+    except: pass
     patterns = [
         r'^(\d+(?:\.\d+)?)\s+(.+)$',   # 數字在前：50 健身
         r'^(.+?)\s+(\d+(?:\.\d+)?)$',  # 文字在前：健身 50
