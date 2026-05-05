@@ -25,8 +25,51 @@ import time
 
 app = Flask(__name__)
 
-# 多步驟記帳狀態
-record_state = {}  # {user_id: {"step": "category/amount/note", "data": {}}}
+# 多步驟記帳狀態（改用 Google Sheets 儲存，重啟不丟失）
+record_state = {}  # 本地快取
+
+def get_record_state(user_id):
+    try:
+        sh = get_sheet()
+        try: ws = sh.worksheet("_State")
+        except:
+            ws = sh.add_worksheet("_State", rows=100, cols=4)
+            ws.append_row(["user_id","step","data","updated"])
+        rows = ws.get_all_values()
+        for i, row in enumerate(rows[1:], 2):
+            if row and row[0] == user_id:
+                return {"step": row[1], "data": json.loads(row[2]) if row[2] else {}, "_row": i}
+        return None
+    except: return record_state.get(user_id)
+
+def set_record_state(user_id, state):
+    record_state[user_id] = state
+    try:
+        sh = get_sheet()
+        try: ws = sh.worksheet("_State")
+        except:
+            ws = sh.add_worksheet("_State", rows=100, cols=4)
+            ws.append_row(["user_id","step","data","updated"])
+        rows = ws.get_all_values()
+        now = datetime.now().strftime("%Y/%m/%d %H:%M:%S")
+        for i, row in enumerate(rows[1:], 2):
+            if row and row[0] == user_id:
+                ws.update(f"A{i}:D{i}", [[user_id, state["step"], json.dumps(state["data"], ensure_ascii=False), now]])
+                return
+        ws.append_row([user_id, state["step"], json.dumps(state["data"], ensure_ascii=False), now])
+    except: pass
+
+def del_record_state(user_id):
+    record_state.pop(user_id, None)
+    try:
+        sh = get_sheet()
+        ws = sh.worksheet("_State")
+        rows = ws.get_all_values()
+        for i, row in enumerate(rows[1:], 2):
+            if row and row[0] == user_id:
+                ws.delete_rows(i)
+                return
+    except: pass
 
 # ── 設定 ──────────────────────────────────────────────────
 LINE_TOKEN  = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
@@ -370,8 +413,8 @@ def handle_text(event):
     user_id = event.source.user_id
 
     # 多步驟記帳流程
-    if user_id in record_state:
-        state = record_state[user_id]
+    state = get_record_state(user_id)
+    if state is not None:
 
         if state["step"] == "category" and text.startswith("__CAT__"):
             cat_val = text.replace("__CAT__", "")
@@ -389,17 +432,17 @@ def handle_text(event):
                 reply_with_categories(reply_token, "選擇支出類別（第2頁）：", page=1)
                 return
             elif cat_val == "__CUSTOM__":
-                record_state[user_id] = {"step": "custom_cat", "data": {}}
+                set_record_state(user_id, {"step": "custom_cat", "data": {}})
                 reply_message(reply_token, "請輸入自訂類別名稱：\n例如：機車油費、寵物費用")
                 return
             # 選完類別，問金額
-            record_state[user_id] = {"step": "amount", "data": {"category": cat_val}}
+            set_record_state(user_id, {"step": "amount", "data": {"category": cat_val}})
             reply_message(reply_token, f"類別：{cat_val}\n\n💰 金額是多少？（直接傳數字）")
             return
 
         if state["step"] == "custom_cat":
             custom_cat = text.strip()
-            record_state[user_id] = {"step": "amount", "data": {"category": custom_cat}}
+            set_record_state(user_id, {"step": "amount", "data": {"category": custom_cat}})
             reply_message(reply_token, f"類別：{custom_cat}\n\n💰 金額是多少？（直接傳數字）")
             return
 
@@ -408,15 +451,16 @@ def handle_text(event):
             if not amt:
                 reply_message(reply_token, "請傳數字金額，例如：85")
                 return
-            record_state[user_id]["data"]["amount"] = amt
-            record_state[user_id]["step"] = "note"
+            state["data"]["amount"] = amt
+            state["step"] = "note"
+            set_record_state(user_id, state)
             reply_message(reply_token, f"金額：NT${int(amt):,}\n\n📌 備註是什麼？（或傳「略過」）")
             return
 
         elif state["step"] == "note":
             note = "" if text == "略過" else text
             data = record_state[user_id]["data"]
-            del record_state[user_id]
+            del_record_state(user_id)
             if append_transaction(today, "支出", data["category"], data["amount"], "TWD", note):
                 reply_message(reply_token, f"✅ 記帳完成！\n{data['category']} NT${int(data['amount']):,}\n{note}")
             else:
@@ -505,7 +549,7 @@ def handle_text(event):
         return
 
     if text in ["記帳", "手動記帳", "新增"]:
-        record_state[user_id] = {"step": "category", "data": {}}
+        set_record_state(user_id, {"step": "category", "data": {}})
         reply_with_categories(reply_token, "選擇支出類別：")
         return
 
