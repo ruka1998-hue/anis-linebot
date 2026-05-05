@@ -459,7 +459,7 @@ def handle_text(event):
 
         elif state["step"] == "note":
             note = "" if text == "略過" else text
-            data = record_state[user_id]["data"]
+            data = state["data"]
             del_record_state(user_id)
             if append_transaction(today, "支出", data["category"], data["amount"], "TWD", note):
                 reply_message(reply_token, f"✅ 記帳完成！\n{data['category']} NT${int(data['amount']):,}\n{note}")
