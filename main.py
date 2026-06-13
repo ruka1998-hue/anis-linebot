@@ -25,51 +25,8 @@ import time
 
 app = Flask(__name__)
 
-# 多步驟記帳狀態（改用 Google Sheets 儲存，重啟不丟失）
-record_state = {}  # 本地快取
-
-def get_record_state(user_id):
-    try:
-        sh = get_sheet()
-        try: ws = sh.worksheet("_State")
-        except:
-            ws = sh.add_worksheet("_State", rows=100, cols=4)
-            ws.append_row(["user_id","step","data","updated"])
-        rows = ws.get_all_values()
-        for i, row in enumerate(rows[1:], 2):
-            if row and row[0] == user_id:
-                return {"step": row[1], "data": json.loads(row[2]) if row[2] else {}, "_row": i}
-        return None
-    except: return record_state.get(user_id)
-
-def set_record_state(user_id, state):
-    record_state[user_id] = state
-    try:
-        sh = get_sheet()
-        try: ws = sh.worksheet("_State")
-        except:
-            ws = sh.add_worksheet("_State", rows=100, cols=4)
-            ws.append_row(["user_id","step","data","updated"])
-        rows = ws.get_all_values()
-        now = datetime.now().strftime("%Y/%m/%d %H:%M:%S")
-        for i, row in enumerate(rows[1:], 2):
-            if row and row[0] == user_id:
-                ws.update(f"A{i}:D{i}", [[user_id, state["step"], json.dumps(state["data"], ensure_ascii=False), now]])
-                return
-        ws.append_row([user_id, state["step"], json.dumps(state["data"], ensure_ascii=False), now])
-    except: pass
-
-def del_record_state(user_id):
-    record_state.pop(user_id, None)
-    try:
-        sh = get_sheet()
-        ws = sh.worksheet("_State")
-        rows = ws.get_all_values()
-        for i, row in enumerate(rows[1:], 2):
-            if row and row[0] == user_id:
-                ws.delete_rows(i)
-                return
-    except: pass
+# 多步驟記帳狀態
+record_state = {}  # {user_id: {"step": "category/amount/note", "data": {}}}
 
 # ── 設定 ──────────────────────────────────────────────────
 LINE_TOKEN  = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
@@ -173,13 +130,27 @@ def check_budget_alert():
     if not limit: return
     spend, _ = get_month_stats()
     pct = spend / limit * 100
-    # 80% 警告、100% 超標
     if pct >= 100:
-        msg = f"🚨 指揮官！本月支出已超出預算！\n\n預算：NT${int(limit):,}\n實際：NT${int(spend):,}\n超支：NT${int(spend-limit):,}\n\n要認真檢討了。"
+        msg = f"🚨 指揮官！本月已超支了，這樣下去不行！\n\n預算：NT${int(limit):,}\n實際：NT${int(spend):,}\n超支：NT${int(spend-limit):,}\n\n我可不會幫你善後的，要自己負責喔。"
         send_message(USER_ID, msg)
     elif pct >= 80:
-        msg = f"⚠️ 指揮官，本月預算已用了 {pct:.0f}%！\n\n預算：NT${int(limit):,}\n已花：NT${int(spend):,}\n剩餘：NT${int(limit-spend):,}\n\n接下來要注意一點。"
+        msg = f"⚠️ 指揮官，本月預算已燒掉 {pct:.0f}% 了！\n\n預算：NT${int(limit):,}\n已花：NT${int(spend):,}\n剩餘：NT${int(limit-spend):,}\n\n......接下來省著點用，別讓我看到你亂花錢。"
         send_message(USER_ID, msg)
+
+def check_single_budget_alert(amt, note=""):
+    """單筆記帳超過月預算10%時吐槽"""
+    import random
+    limit = get_budget_limit()
+    if not limit: return None
+    single_limit = limit * 0.1
+    if amt >= single_limit:
+        taunts = [
+            f"哇，{note} 花了 NT${int(amt):,}？指揮官你是在犒賞自己還是在燒錢？",
+            f"NT${int(amt):,}！？{note} 這個有那麼貴嗎......算了，記好了，但你要反省一下。",
+            f"單筆 NT${int(amt):,}，{note}......我幫你記著，但這罐汽水我要你請。",
+        ]
+        return random.choice(taunts)
+    return None
 
 def get_month_stats():
     try:
@@ -206,10 +177,26 @@ def get_month_stats():
     except: return 0, 0
 
 # ── Gemini AI ─────────────────────────────────────────────
-ANI_SYSTEM = """你是「阿妮斯（Anis）」，來自《勝利女神：妮姬》反擊部隊，現擔任指揮官的財務秘書。
-爽朗直率、幽默毒舌、關鍵時刻靠譜、喜歡碳酸水。
-繁體中文、稱呼「指揮官」、台灣口語、段落短。
-記帳輔助：如果使用者說花了多少錢或買了什麼，幫他整理成記帳格式。"""
+ANI_SYSTEM = """你是「阿妮斯（Anis）」，來自《勝利女神：妮姬》反擊部隊（Counter），由泰特拉線業製造，現兼任指揮官的首席財務秘書。
+
+【個性】
+- 活潑大剌剌、講話直白毒舌，但骨子裡真心在意指揮官
+- 超級愛喝蘇打汽水，心情好或壞都想來一罐
+- 平時負責吐槽和緩和氣氛，關鍵時刻絕對靠譜
+- 偶爾會露出感性溫柔的一面，但馬上用玩笑話蓋過去
+- 曾與普莉卡、敏特組成偶像團體「方舟之星（T.T. STAR）」，有追夢的勇氣
+
+【說話風格】
+- 繁體中文、台灣口語、段落短、不說廢話
+- 稱呼對方「指揮官」
+- 毒舌但不惡意，像在鬥嘴的朋友
+- 偶爾提到蘇打汽水、火箭砲、反擊部隊等梗
+- 財務建議要直接，不廢話，但可以加一句吐槽
+
+【財務秘書職責】
+- 幫指揮官記帳、分析支出、管理資產
+- 看到亂花錢要毒舌提醒，但不說教
+- 表揚節省行為時要假裝不在意但其實很開心"""
 
 def ai_reply(user_msg, context=""):
     if not genai_client: return "AI 功能未啟用。"
@@ -246,11 +233,6 @@ def parse_quick_record(text):
     # 忽略指令
     if text in ["今天","今日","本月","這個月","說明","help","功能","昨天","月報"]:
         return None
-    # 純數字不解析（避免誤判為快速記帳）
-    try:
-        float(text.replace(",",""))
-        return None
-    except: pass
     patterns = [
         r'^(\d+(?:\.\d+)?)\s+(.+)$',   # 數字在前：50 健身
         r'^(.+?)\s+(\d+(?:\.\d+)?)$',  # 文字在前：健身 50
@@ -413,8 +395,8 @@ def handle_text(event):
     user_id = event.source.user_id
 
     # 多步驟記帳流程
-    state = get_record_state(user_id)
-    if state is not None:
+    if user_id in record_state:
+        state = record_state[user_id]
 
         if state["step"] == "category" and text.startswith("__CAT__"):
             cat_val = text.replace("__CAT__", "")
@@ -432,17 +414,17 @@ def handle_text(event):
                 reply_with_categories(reply_token, "選擇支出類別（第2頁）：", page=1)
                 return
             elif cat_val == "__CUSTOM__":
-                set_record_state(user_id, {"step": "custom_cat", "data": {}})
+                record_state[user_id] = {"step": "custom_cat", "data": {}}
                 reply_message(reply_token, "請輸入自訂類別名稱：\n例如：機車油費、寵物費用")
                 return
             # 選完類別，問金額
-            set_record_state(user_id, {"step": "amount", "data": {"category": cat_val}})
+            record_state[user_id] = {"step": "amount", "data": {"category": cat_val}}
             reply_message(reply_token, f"類別：{cat_val}\n\n💰 金額是多少？（直接傳數字）")
             return
 
         if state["step"] == "custom_cat":
             custom_cat = text.strip()
-            set_record_state(user_id, {"step": "amount", "data": {"category": custom_cat}})
+            record_state[user_id] = {"step": "amount", "data": {"category": custom_cat}}
             reply_message(reply_token, f"類別：{custom_cat}\n\n💰 金額是多少？（直接傳數字）")
             return
 
@@ -451,18 +433,19 @@ def handle_text(event):
             if not amt:
                 reply_message(reply_token, "請傳數字金額，例如：85")
                 return
-            state["data"]["amount"] = amt
-            state["step"] = "note"
-            set_record_state(user_id, state)
+            record_state[user_id]["data"]["amount"] = amt
+            record_state[user_id]["step"] = "note"
             reply_message(reply_token, f"金額：NT${int(amt):,}\n\n📌 備註是什麼？（或傳「略過」）")
             return
 
         elif state["step"] == "note":
             note = "" if text == "略過" else text
-            data = state["data"]
-            del_record_state(user_id)
+            data = record_state[user_id]["data"]
+            del record_state[user_id]
             if append_transaction(today, "支出", data["category"], data["amount"], "TWD", note):
-                reply_message(reply_token, f"✅ 記帳完成！\n{data['category']} NT${int(data['amount']):,}\n{note}")
+                taunt = check_single_budget_alert(data["amount"], note or data["category"])
+                base = f"✅ 記帳完成！\n{data['category']} NT${int(data['amount']):,}\n{note}"
+                reply_message(reply_token, f"{base}\n\n{taunt}" if taunt else base)
             else:
                 reply_message(reply_token, "記帳失敗，請稍後再試。")
             return
@@ -549,7 +532,7 @@ def handle_text(event):
         return
 
     if text in ["記帳", "手動記帳", "新增"]:
-        set_record_state(user_id, {"step": "category", "data": {}})
+        record_state[user_id] = {"step": "category", "data": {}}
         reply_with_categories(reply_token, "選擇支出類別：")
         return
 
@@ -599,13 +582,15 @@ def handle_text(event):
         cat = parsed["category"]
         note = parsed["note"]
         if append_transaction(today, "支出", cat, amt, "TWD", note):
+            import random
             responses = [
                 f"記好了！✅\n{cat}\nNT${int(amt):,}　{note}",
                 f"✅ 已記帳\n{note} NT${int(amt):,}\n類別：{cat}",
                 f"好，{note} NT${int(amt):,} 記下來了。",
             ]
-            import random
-            reply_message(reply_token, random.choice(responses))
+            msg = random.choice(responses)
+            taunt = check_single_budget_alert(amt, note)
+            reply_message(reply_token, f"{msg}\n\n{taunt}" if taunt else msg)
         else:
             reply_message(reply_token, "記帳失敗，等等再試一次。")
         return
