@@ -25,8 +25,8 @@ import time
 
 app = Flask(__name__)
 
-# 多步驟記帳狀態
-record_state = {}  # {user_id: {"step": "category/amount/note", "data": {}}}
+# 多步驟記帳狀態（本地快取，實際存 Google Sheets _State 分頁，重啟不丟失）
+record_state = {}
 
 # ── 設定 ──────────────────────────────────────────────────
 LINE_TOKEN  = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
@@ -62,6 +62,58 @@ def get_sheet():
     client = gspread.authorize(creds)
     return client.open_by_url(SHEET_URL)
 
+def get_record_state(user_id):
+    """讀取記帳狀態，優先從 Google Sheets _State 分頁"""
+    try:
+        sh = get_sheet()
+        try: ws = sh.worksheet("_State")
+        except:
+            ws = sh.add_worksheet("_State", rows=100, cols=4)
+            ws.append_row(["user_id","step","data","updated"])
+            return None
+        rows = ws.get_all_values()
+        for i, row in enumerate(rows[1:], 2):
+            if row and row[0] == user_id:
+                return {"step": row[1], "data": json.loads(row[2]) if len(row)>2 and row[2] else {}, "_row": i}
+        return None
+    except Exception as e:
+        print(f"讀取狀態失敗: {e}")
+        return record_state.get(user_id)
+
+def set_record_state(user_id, state):
+    """寫入記帳狀態到 Google Sheets _State 分頁"""
+    record_state[user_id] = state
+    try:
+        sh = get_sheet()
+        try: ws = sh.worksheet("_State")
+        except:
+            ws = sh.add_worksheet("_State", rows=100, cols=4)
+            ws.append_row(["user_id","step","data","updated"])
+        rows = ws.get_all_values()
+        now = datetime.now().strftime("%Y/%m/%d %H:%M:%S")
+        data_str = json.dumps(state["data"], ensure_ascii=False)
+        for i, row in enumerate(rows[1:], 2):
+            if row and row[0] == user_id:
+                ws.update(f"A{i}:D{i}", [[user_id, state["step"], data_str, now]])
+                return
+        ws.append_row([user_id, state["step"], data_str, now])
+    except Exception as e:
+        print(f"寫入狀態失敗: {e}")
+
+def del_record_state(user_id):
+    """刪除記帳狀態"""
+    record_state.pop(user_id, None)
+    try:
+        sh = get_sheet()
+        ws = sh.worksheet("_State")
+        rows = ws.get_all_values()
+        for i, row in enumerate(rows[1:], 2):
+            if row and row[0] == user_id:
+                ws.delete_rows(i)
+                return
+    except Exception as e:
+        print(f"刪除狀態失敗: {e}")
+
 def append_transaction(date_str, tx_type, category, amount, currency="TWD", note=""):
     try:
         sh = get_sheet()
@@ -76,6 +128,21 @@ def append_transaction(date_str, tx_type, category, amount, currency="TWD", note
 def safe_float(val):
     try: return float(str(val).replace(",","").replace(" ",""))
     except: return None
+
+def get_stock_price(sym):
+    """多重嘗試抓股價，提高剛上市/冷門股成功率"""
+    import yfinance as yf
+    for period in ["5d","1mo"]:
+        try:
+            h = yf.Ticker(sym).history(period=period)["Close"]
+            if not h.empty: return float(h.iloc[-1])
+        except: continue
+    try:
+        fi = yf.Ticker(sym).fast_info
+        p = fi.get("lastPrice") or fi.get("last_price")
+        if p: return float(p)
+    except: pass
+    return None
 
 def get_today_stats():
     try:
@@ -175,6 +242,82 @@ def get_month_stats():
             except: continue
         return total_spend, total_income
     except: return 0, 0
+
+def get_month_category_chart():
+    """產生本月支出分類的文字長條圖"""
+    try:
+        sh = get_sheet()
+        ws = sh.worksheet("Transactions")
+        rows = ws.get_all_values()
+        if not rows or len(rows) < 2: return None
+        headers = [h.strip().lower() for h in rows[0]]
+        cur_month = date.today().strftime("%Y/%m")
+        d_idx = headers.index("date") if "date" in headers else 0
+        t_idx = headers.index("type") if "type" in headers else 1
+        c_idx = headers.index("category") if "category" in headers else 2
+        a_idx = headers.index("amount") if "amount" in headers else 3
+        cat_sum = {}
+        for row in rows[1:]:
+            if len(row) <= a_idx: continue
+            try:
+                if row[d_idx].strip().startswith(cur_month) and row[t_idx].strip() == "支出":
+                    amt = float(str(row[a_idx]).replace(",",""))
+                    cat = row[c_idx].strip()
+                    cat_sum[cat] = cat_sum.get(cat, 0) + amt
+            except: continue
+        if not cat_sum: return None
+        total = sum(cat_sum.values())
+        ranked = sorted(cat_sum.items(), key=lambda x: x[1], reverse=True)
+        lines = [f"📊 {cur_month} 支出分布", f"總支出 NT${int(total):,}", ""]
+        for cat, amt in ranked[:8]:
+            pct = amt / total * 100
+            bar = "█" * max(1, int(pct / 5))  # 每5%一個方塊
+            lines.append(f"{cat}")
+            lines.append(f"{bar} {pct:.0f}% NT${int(amt):,}")
+        return "\n".join(lines)
+    except Exception as e:
+        print(f"圖表產生失敗: {e}")
+        return None
+
+def get_streak_days():
+    """計算連續記帳天數"""
+    try:
+        sh = get_sheet()
+        ws = sh.worksheet("Transactions")
+        rows = ws.get_all_values()
+        if not rows or len(rows) < 2: return 0
+        headers = [h.strip().lower() for h in rows[0]]
+        d_idx = headers.index("date") if "date" in headers else 0
+        dates = set()
+        for row in rows[1:]:
+            if len(row) <= d_idx: continue
+            ds = row[d_idx].strip()
+            if ds: dates.add(ds)
+        if not dates: return 0
+        streak = 0
+        d = date.today()
+        while d.strftime("%Y/%m/%d") in dates:
+            streak += 1
+            d = d - timedelta(days=1)
+        return streak
+    except: return 0
+
+def get_achievement(streak):
+    """根據連續天數回傳成就與阿妮斯台詞"""
+    if streak >= 100:
+        return "🏆 百日成就", "一百天連續記帳！？指揮官，我對你刮目相看了。這份毅力，連我都甘拜下風。"
+    elif streak >= 60:
+        return "💎 鑽石記帳官", "連續60天，你是認真的吧。好啦，我承認你是個可靠的指揮官。"
+    elif streak >= 30:
+        return "👑 黃金記帳官", "整整一個月不間斷，不錯嘛指揮官。這杯碳酸水我請你。🫧"
+    elif streak >= 14:
+        return "🥈 白銀記帳官", "兩週了，習慣養成中。繼續保持，別在這時候鬆懈。"
+    elif streak >= 7:
+        return "🥉 青銅記帳官", "連續一週！有點樣子了，指揮官。"
+    elif streak >= 3:
+        return "🌱 記帳新星", "連續三天，開始上手了喔。"
+    return None, None
+
 
 # ── Gemini AI ─────────────────────────────────────────────
 ANI_SYSTEM = """你是「阿妮斯（Anis）」，來自《勝利女神：妮姬》反擊部隊（Counter），由泰特拉線業製造，現兼任指揮官的首席財務秘書。
@@ -327,12 +470,15 @@ def run_scheduler():
 # ── Webhook 處理 ──────────────────────────────────────────
 @app.route("/callback", methods=["POST"])
 def callback():
-    signature = request.headers["X-Line-Signature"]
+    signature = request.headers.get("X-Line-Signature", "")
     body = request.get_data(as_text=True)
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
         abort(400)
+    except Exception as e:
+        # 單一訊息處理失敗不影響整體服務，記 log 但回 200 避免 LINE 重送
+        print(f"[callback error] {e}")
     return "OK"
 
 # 類別頁面
@@ -395,8 +541,8 @@ def handle_text(event):
     user_id = event.source.user_id
 
     # 多步驟記帳流程
-    if user_id in record_state:
-        state = record_state[user_id]
+    state = get_record_state(user_id)
+    if state is not None:
 
         if state["step"] == "category" and text.startswith("__CAT__"):
             cat_val = text.replace("__CAT__", "")
@@ -414,17 +560,17 @@ def handle_text(event):
                 reply_with_categories(reply_token, "選擇支出類別（第2頁）：", page=1)
                 return
             elif cat_val == "__CUSTOM__":
-                record_state[user_id] = {"step": "custom_cat", "data": {}}
+                set_record_state(user_id, {"step": "custom_cat", "data": {}})
                 reply_message(reply_token, "請輸入自訂類別名稱：\n例如：機車油費、寵物費用")
                 return
             # 選完類別，問金額
-            record_state[user_id] = {"step": "amount", "data": {"category": cat_val}}
+            set_record_state(user_id, {"step": "amount", "data": {"category": cat_val}})
             reply_message(reply_token, f"類別：{cat_val}\n\n💰 金額是多少？（直接傳數字）")
             return
 
         if state["step"] == "custom_cat":
             custom_cat = text.strip()
-            record_state[user_id] = {"step": "amount", "data": {"category": custom_cat}}
+            set_record_state(user_id, {"step": "amount", "data": {"category": custom_cat}})
             reply_message(reply_token, f"類別：{custom_cat}\n\n💰 金額是多少？（直接傳數字）")
             return
 
@@ -433,15 +579,16 @@ def handle_text(event):
             if not amt:
                 reply_message(reply_token, "請傳數字金額，例如：85")
                 return
-            record_state[user_id]["data"]["amount"] = amt
-            record_state[user_id]["step"] = "note"
+            state["data"]["amount"] = amt
+            state["step"] = "note"
+            set_record_state(user_id, state)
             reply_message(reply_token, f"金額：NT${int(amt):,}\n\n📌 備註是什麼？（或傳「略過」）")
             return
 
         elif state["step"] == "note":
             note = "" if text == "略過" else text
-            data = record_state[user_id]["data"]
-            del record_state[user_id]
+            data = state["data"]
+            del_record_state(user_id)
             if append_transaction(today, "支出", data["category"], data["amount"], "TWD", note):
                 taunt = check_single_budget_alert(data["amount"], note or data["category"])
                 base = f"✅ 記帳完成！\n{data['category']} NT${int(data['amount']):,}\n{note}"
@@ -507,9 +654,8 @@ def handle_text(event):
                             sym = str(row[sym_idx]).strip().upper()
                             qty = float(str(row[sha_idx]).replace(",",""))
                             if not sym or not qty: continue
-                            hist = yf.Ticker(sym).history(period="2d")["Close"]
-                            if hist.empty: continue
-                            price = float(hist.iloc[-1])
+                            price = get_stock_price(sym)
+                            if not price: continue
                             is_tw = sym.endswith(".TW") or sym.endswith(".TWO")
                             twd = price * qty * (1.0 if is_tw else 32.5)
                             stock_total += twd
@@ -532,7 +678,7 @@ def handle_text(event):
         return
 
     if text in ["記帳", "手動記帳", "新增"]:
-        record_state[user_id] = {"step": "category", "data": {}}
+        set_record_state(user_id, {"step": "category", "data": {}})
         reply_with_categories(reply_token, "選擇支出類別：")
         return
 
@@ -552,6 +698,28 @@ def handle_text(event):
         reply_message(reply_token, msg)
         return
 
+    if text in ["圖表", "分析", "支出分布", "本月圖表"]:
+        chart = get_month_category_chart()
+        if chart:
+            reply_message(reply_token, chart)
+        else:
+            reply_message(reply_token, "這個月還沒有支出資料，先記幾筆吧指揮官。")
+        return
+
+    if text in ["成就", "連續", "記帳天數", "streak"]:
+        streak = get_streak_days()
+        if streak == 0:
+            reply_message(reply_token, "今天還沒記帳喔，連續記錄從今天開始吧！")
+            return
+        title, line = get_achievement(streak)
+        if title:
+            msg = f"🔥 連續記帳 {streak} 天！\n\n{title}\n\n阿妮斯：{line}"
+        else:
+            need = 3 - streak
+            msg = f"🔥 連續記帳 {streak} 天！\n\n再 {need} 天就能解鎖第一個成就，加油指揮官。"
+        reply_message(reply_token, msg)
+        return
+
     if text in ["說明", "幫助", "help", "功能"]:
         msg = """⚡ 阿妮斯の幕僚室 使用說明
 
@@ -564,6 +732,8 @@ def handle_text(event):
 📊 查詢指令
 ・今天 → 今日支出
 ・本月 → 本月收支
+・圖表 → 本月支出分布
+・成就 → 連續記帳天數
 ・資產 → 資產總覽
 ・說明 → 這個說明
 
