@@ -133,15 +133,7 @@ def get_stock_price(sym):
     """多重嘗試抓股價，提高剛上市/冷門股成功率"""
     import yfinance as yf
     import math
-    # 方法1：history（過濾 NaN）
-    for period in ["5d","1mo"]:
-        try:
-            h = yf.Ticker(sym).history(period=period)["Close"].dropna()
-            if not h.empty:
-                v = float(h.iloc[-1])
-                if not math.isnan(v) and v>0: return v
-        except: continue
-    # 方法2：fast_info（剛上市股票通常有效）
+    # 方法1：fast_info 即時價優先（最新最準）
     try:
         fi = yf.Ticker(sym).fast_info
         p = fi.get("lastPrice") or fi.get("last_price")
@@ -149,6 +141,14 @@ def get_stock_price(sym):
             v = float(p)
             if not math.isnan(v) and v>0: return v
     except: pass
+    # 方法2：history 備援（過濾 NaN）
+    for period in ["5d","1mo"]:
+        try:
+            h = yf.Ticker(sym).history(period=period)["Close"].dropna()
+            if not h.empty:
+                v = float(h.iloc[-1])
+                if not math.isnan(v) and v>0: return v
+        except: continue
     # 方法3：Stooq 備援
     try:
         import urllib.request, csv, io as _io
