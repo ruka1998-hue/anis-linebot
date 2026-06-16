@@ -132,15 +132,36 @@ def safe_float(val):
 def get_stock_price(sym):
     """多重嘗試抓股價，提高剛上市/冷門股成功率"""
     import yfinance as yf
+    import math
+    # 方法1：history（過濾 NaN）
     for period in ["5d","1mo"]:
         try:
-            h = yf.Ticker(sym).history(period=period)["Close"]
-            if not h.empty: return float(h.iloc[-1])
+            h = yf.Ticker(sym).history(period=period)["Close"].dropna()
+            if not h.empty:
+                v = float(h.iloc[-1])
+                if not math.isnan(v) and v>0: return v
         except: continue
+    # 方法2：fast_info（剛上市股票通常有效）
     try:
         fi = yf.Ticker(sym).fast_info
         p = fi.get("lastPrice") or fi.get("last_price")
-        if p: return float(p)
+        if p:
+            v = float(p)
+            if not math.isnan(v) and v>0: return v
+    except: pass
+    # 方法3：Stooq 備援
+    try:
+        import urllib.request, csv, io as _io
+        is_tw = sym.endswith(".TW") or sym.endswith(".TWO")
+        stooq_sym = sym.lower() if is_tw else f"{sym.lower()}.us"
+        url=f"https://stooq.com/q/l/?s={stooq_sym}&f=sd2t2ohlcv&h&e=csv"
+        with urllib.request.urlopen(url, timeout=8) as resp:
+            txt=resp.read().decode("utf-8")
+        rows=list(csv.DictReader(_io.StringIO(txt)))
+        if rows:
+            close=rows[0].get("Close","")
+            if close and close not in ("N/D","-"):
+                return float(close)
     except: pass
     return None
 
