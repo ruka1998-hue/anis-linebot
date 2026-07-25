@@ -16,12 +16,8 @@ import gspread
 from google.oauth2.service_account import Credentials
 from google import genai
 from google.genai import types
-from PIL import Image
-import io
 import base64
-import schedule
 import threading
-import time
 
 app = Flask(__name__)
 
@@ -479,14 +475,8 @@ def weekly_report():
     msg = f"📅 本月截至目前：\n💸 支出：NT${int(spend):,}\n💵 收入：NT${int(income):,}\n💰 結餘：NT${int(income-spend):,}\n\n繼續保持記帳習慣！"
     send_message(USER_ID, msg)
 
-def run_scheduler():
-    schedule.every().day.at("08:00").do(morning_remind)        # 早上8點
-    schedule.every().day.at("21:00").do(evening_remind)        # 晚上9點提醒記帳
-    schedule.every().monday.at("08:00").do(weekly_report)      # 週一早上週報
-    schedule.every().day.at("22:00").do(check_budget_alert)    # 每晚10點檢查預算
-    while True:
-        schedule.run_pending()
-        time.sleep(60)
+# 註：定時提醒改由 cron-job.org 外部呼叫 /remind 觸發，
+#     不使用內建 schedule 套件（gunicorn 環境下不會執行，且佔記憶體）
 
 # ── Webhook 處理 ──────────────────────────────────────────
 @app.route("/callback", methods=["POST"])
@@ -656,7 +646,6 @@ def handle_text(event):
 
             def fetch_stocks_push(cash_total, uid):
                 try:
-                    import yfinance as yf
                     sh2 = get_sheet()
                     ws_s = sh2.worksheet("Stocks")
                     srows = ws_s.get_all_values()
@@ -691,6 +680,15 @@ def handle_text(event):
                         send_message(uid, "找不到股票資料。")
                 except Exception as e:
                     send_message(uid, f"股票查詢失敗：{e}")
+                finally:
+                    # 查完主動釋放記憶體，避免 Render 免費方案 OOM
+                    try:
+                        import gc, sys
+                        for m in list(sys.modules):
+                            if m.startswith("yfinance"):
+                                del sys.modules[m]
+                        gc.collect()
+                    except: pass
 
             threading.Thread(target=fetch_stocks_push, args=(total, user_id), daemon=True).start()
 
@@ -840,8 +838,7 @@ def trigger_remind():
     return "ok", 200
 
 if __name__ == "__main__":
-    # 啟動排程執行緒
-    t = threading.Thread(target=run_scheduler, daemon=True)
-    t.start()
+    # 本機測試用；正式環境由 gunicorn 啟動
+    # 定時提醒由 cron-job.org 呼叫 /remind 觸發
     port = int(os.environ.get("PORT", 8000))
     app.run(host="0.0.0.0", port=port)
