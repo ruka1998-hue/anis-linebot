@@ -125,41 +125,7 @@ def safe_float(val):
     try: return float(str(val).replace(",","").replace(" ",""))
     except: return None
 
-def get_stock_price(sym):
-    """多重嘗試抓股價，提高剛上市/冷門股成功率"""
-    import yfinance as yf
-    import math
-    # 方法1：fast_info 即時價優先（最新最準）
-    try:
-        fi = yf.Ticker(sym).fast_info
-        p = fi.get("lastPrice") or fi.get("last_price")
-        if p:
-            v = float(p)
-            if not math.isnan(v) and v>0: return v
-    except: pass
-    # 方法2：history 備援（過濾 NaN）
-    for period in ["5d","1mo"]:
-        try:
-            h = yf.Ticker(sym).history(period=period)["Close"].dropna()
-            if not h.empty:
-                v = float(h.iloc[-1])
-                if not math.isnan(v) and v>0: return v
-        except: continue
-    # 方法3：Stooq 備援
-    try:
-        import urllib.request, csv, io as _io
-        is_tw = sym.endswith(".TW") or sym.endswith(".TWO")
-        stooq_sym = sym.lower() if is_tw else f"{sym.lower()}.us"
-        url=f"https://stooq.com/q/l/?s={stooq_sym}&f=sd2t2ohlcv&h&e=csv"
-        with urllib.request.urlopen(url, timeout=8) as resp:
-            txt=resp.read().decode("utf-8")
-        rows=list(csv.DictReader(_io.StringIO(txt)))
-        if rows:
-            close=rows[0].get("Close","")
-            if close and close not in ("N/D","-"):
-                return float(close)
-    except: pass
-    return None
+# 註：股價查詢已移至 Streamlit APP（yfinance 太吃記憶體，會導致 Render OOM）
 
 def get_today_stats():
     try:
@@ -641,56 +607,13 @@ def handle_text(event):
                 return
 
             detail_str = "\n".join(details[:10])
-            cash_msg = f"💰 現金資產\n\n{detail_str}\n\n{'─'*15}\n小計：NT${int(total):,}\n\n📈 股票查詢中，稍等..."
+            cash_msg = (
+                f"💰 現金資產\n\n{detail_str}\n\n{'─'*15}\n"
+                f"現金小計：NT${int(total):,}\n\n"
+                f"📈 股票即時市值請到幕僚室 APP 查看，那邊圖表比較清楚。\n"
+                f"https://wealth-app-ojhbav9wyrefyqvpy96fdd.streamlit.app"
+            )
             reply_message(reply_token, cash_msg)
-
-            def fetch_stocks_push(cash_total, uid):
-                try:
-                    sh2 = get_sheet()
-                    ws_s = sh2.worksheet("Stocks")
-                    srows = ws_s.get_all_values()
-                    if not srows or len(srows) < 2:
-                        send_message(uid, "股票分頁是空的。")
-                        return
-                    sheaders = [h.strip().lower() for h in srows[0]]
-                    stock_total = 0
-                    stock_lines = []
-                    for row in srows[1:]:
-                        if len(row) < 2: continue
-                        try:
-                            sym_idx = sheaders.index("symbol") if "symbol" in sheaders else 0
-                            sha_idx = sheaders.index("shares") if "shares" in sheaders else 2
-                            name_idx = sheaders.index("name") if "name" in sheaders else 1
-                            sym = str(row[sym_idx]).strip().upper()
-                            qty = float(str(row[sha_idx]).replace(",",""))
-                            if not sym or not qty: continue
-                            price = get_stock_price(sym)
-                            if not price: continue
-                            is_tw = sym.endswith(".TW") or sym.endswith(".TWO")
-                            twd = price * qty * (1.0 if is_tw else 32.5)
-                            stock_total += twd
-                            name = row[name_idx] if len(row) > name_idx else sym
-                            stock_lines.append(f"・{name}({sym})：NT${int(twd):,}")
-                        except: continue
-                    if stock_lines:
-                        net = cash_total + stock_total
-                        push_msg = f"📈 股票市值\n\n{"\n".join(stock_lines)}\n\n{'─'*15}\n股票小計：NT${int(stock_total):,}\n💰 淨資產合計：NT${int(net):,}"
-                        send_message(uid, push_msg)
-                    else:
-                        send_message(uid, "找不到股票資料。")
-                except Exception as e:
-                    send_message(uid, f"股票查詢失敗：{e}")
-                finally:
-                    # 查完主動釋放記憶體，避免 Render 免費方案 OOM
-                    try:
-                        import gc, sys
-                        for m in list(sys.modules):
-                            if m.startswith("yfinance"):
-                                del sys.modules[m]
-                        gc.collect()
-                    except: pass
-
-            threading.Thread(target=fetch_stocks_push, args=(total, user_id), daemon=True).start()
 
         except Exception as e:
             reply_message(reply_token, f"查詢失敗：{e}")
@@ -753,7 +676,7 @@ def handle_text(event):
 ・本月 → 本月收支
 ・圖表 → 本月支出分布
 ・成就 → 連續記帳天數
-・資產 → 資產總覽
+・資產 → 現金資產（股票看 APP）
 ・說明 → 這個說明
 
 💬 自由對話
